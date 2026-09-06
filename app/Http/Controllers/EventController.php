@@ -1,9 +1,10 @@
 <?php
+
 namespace App\Http\Controllers;
 
 use App\Models\Event;
-use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Http\JsonResponse;
 use Illuminate\Validation\ValidationException;
 
 class EventController extends Controller
@@ -23,13 +24,16 @@ class EventController extends Controller
     {
         try {
             $validated = $request->validate([
-                'event_id'   => 'required|string|max:100',
+                'event_id' => 'required|string|max:100',
                 'event_type' => 'required|string|in:view_item,add_to_cart,purchase',
                 'session_id' => 'required|string|max:100',
                 'product_id' => 'nullable|string|max:100',
-                'value'      => 'nullable|numeric',
-                'currency'   => 'nullable|string|size:3',
-                'event_time' => 'required|date',
+                'value' => 'nullable|numeric',
+                'currency' => 'nullable|string|size:3',
+                // Optional: GTM's server-side variable picker has no reliable
+                // client-side timestamp source, so this defaults to the
+                // server's own receipt time when omitted (see below).
+                'event_time' => 'nullable|date',
             ]);
         } catch (ValidationException $e) {
             return response()->json([
@@ -40,12 +44,14 @@ class EventController extends Controller
 
         $event = Event::firstOrCreate(
             ['event_id' => $validated['event_id']],
-            $validated
+            array_merge($validated, [
+                'event_time' => $validated['event_time'] ?? now(),
+            ])
         );
 
         return response()->json([
-            'status'    => 'ok',
-            'event_id'  => $event->event_id,
+            'status' => 'ok',
+            'event_id' => $event->event_id,
             'duplicate' => ! $event->wasRecentlyCreated,
         ], $event->wasRecentlyCreated ? 201 : 200);
     }
@@ -57,9 +63,9 @@ class EventController extends Controller
      */
     public function dashboard()
     {
-        $totalEvents    = Event::count();
+        $totalEvents = Event::count();
         $addToCartCount = Event::where('event_type', 'add_to_cart')->count();
-        $purchaseCount  = Event::where('event_type', 'purchase')->count();
+        $purchaseCount = Event::where('event_type', 'purchase')->count();
         $abandonedCount = Event::abandoned()->count();
         $recoveredCount = Event::where('recovery_triggered', true)->count();
 

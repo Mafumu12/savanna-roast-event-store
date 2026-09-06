@@ -7,3 +7,4 @@ use Illuminate\Support\Facades\Schedule;
 // 60 minutes (the command's default) gets flagged and the recovery
 // trigger fires exactly once per cart (see recovery_triggered column).
 Schedule::command(DetectAbandonedCarts::class)->everyFifteenMinutes();
+Schedule::command(SyncHubspotClosedDeals::class)->everyFifteenMinutes();

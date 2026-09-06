@@ -35,4 +35,13 @@ return [
         ],
     ],
 
+    'hubspot' => [
+        'service_key' => env('HUBSPOT_SERVICE_KEY'),
+    ],
+
+    'tiktok' => [
+        'pixel_id' => env('TIKTOK_PIXEL_ID'),
+        'access_token' => env('TIKTOK_ACCESS_TOKEN'),
+    ],
+
 ];
