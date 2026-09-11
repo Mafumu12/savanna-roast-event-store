@@ -1,55 +1,78 @@
-# Savanna Roast Co. — Event Store (Phases 3 & 5)
+# Savanna Roast Co.: Event Store & Conversion Automation
 
-First-party event storage, automated abandoned-cart recovery, and an
-offline-to-online conversion bridge between HubSpot and TikTok's
-Conversions API — extending the server-side tracking infrastructure built
-in Phases 1-2. See the main project brief
-(`savanna-roast-tracking-infrastructure-brief.md`) for full context.
+A self-hosted backend that solves two problems most small e-commerce and service businesses have with their marketing data: incomplete ad tracking, and no automated way to recover lost sales or connect offline revenue back to the ads that generated it.
 
 **Live deployment:** `https://limbalabs.duckdns.org/events-api/`
 
-## What this is
+## The problem this solves
 
-Two things live in this one Laravel app:
+Ad platforms like TikTok only know what a business tells them. Two gaps show up constantly:
 
-**Phase 3 — Event store + cart recovery**
-Receives a copy of every tracking event (`view_item`, `add_to_cart`,
-`purchase`) from the existing server-side GTM container, stores it in a
-first-party database, and automatically checks every 15 minutes for
-abandoned carts — firing a recovery trigger (log + optional webhook) when
-found. This is a parallel destination alongside GA4 and TikTok, not a
-replacement for either.
+1. **Lost conversions.** Standard browser-based tracking scripts miss a meaningful share of real events due to ad blockers, browser privacy defaults, and network issues. The ad platform ends up optimizing on incomplete data, and it can't tell which of a business's ad campaigns are actually working.
+2. **Invisible offline outcomes.** A customer clicks an ad, fills out a form, and the deal closes weeks later in a CRM. The ad platform never learns whether that click turned into real revenue, so it can't optimize toward the customers who actually convert, only toward people who filled out a form.
 
-**Phase 5 — HubSpot → TikTok offline conversion bridge**
-Every 15 minutes, polls HubSpot's API for deals that just moved to Closed
-Won, looks up the `tiktok_click_id` stored on the associated Contact
-(captured at initial form submission via the Limba Labs landing page), and
-fires a delayed `CompletePayment` event to TikTok's Conversions API with the
-real, realized deal value. This is what lets ad platforms learn from actual
-closed revenue instead of just lead-form fills — solving the same "offline
-conversions are invisible to ad platforms" problem for Limba Labs' own
-pipeline as a real, working example.
+This project addresses both, using the same underlying data pipeline.
 
-## Current live setup (as actually deployed)
+## What it actually does
 
-- **Location:** `/var/www/savanna-roast-event-store` on the EC2 instance
-  (moved here from `/home/ubuntu/` after discovering Nginx can't traverse
-  into another user's home directory regardless of file permissions)
-- **Ownership:** `ubuntu:www-data`, `775` on `storage/`, `bootstrap/cache/`,
-  `database/` — shared so both Nginx/PHP-FPM and manual `artisan` commands
-  can write without permission conflicts
-- **Web server:** Nginx + PHP-FPM (`php8.5-fpm`), served at
-  `https://limbalabs.duckdns.org/events-api/` via a path-based location
-  block (see `nginx-config-reference.conf` below for the exact working
-  config, since Laravel's routing inside a subpath needed specific
-  `SCRIPT_FILENAME`/`SCRIPT_NAME`/`PATH_INFO` handling — this took a few
-  iterations to get right)
-- **Database:** SQLite (`database/database.sqlite`)
-- **Scheduler:** real cron (`* * * * * cd .../event-store && php artisan
-  schedule:run`) driving Laravel's own scheduler, which runs both
-  `carts:detect-abandoned` and `hubspot:sync-closed-deals` every 15 minutes
+This is a Laravel application with three connected capabilities:
 
-### Reference Nginx config (path-based subdirectory serving)
+**1. First-party event storage.** Every meaningful customer event (viewing a product, adding to cart, completing a purchase) is captured server-side and stored in a database this business owns outright, independent of any ad platform or analytics tool. This is the same data being sent to GA4 and TikTok, kept as a permanent, queryable record rather than disappearing into a third-party dashboard.
+
+**2. Automated cart recovery.** A scheduled job checks every 15 minutes for carts that were started but never completed. When it finds one, it fires a recovery action (currently a log entry, with an optional webhook hook for connecting to a real email or SMS platform) so a lost sale gets a chance at recovery without a human needing to notice it manually.
+
+**3. Offline conversion bridge (CRM to TikTok).** When a lead first arrives from a TikTok ad, the click identifier TikTok attaches to the URL is captured and stored against that contact in HubSpot. Weeks later, if that contact becomes a closed deal, a scheduled job detects the change in HubSpot, looks up the stored click identifier, and reports the real deal value back to TikTok as a conversion. This lets the ad platform's algorithm learn from actual revenue outcomes instead of just lead form fills.
+
+## How the pieces connect
+
+```
+Website event (view, add to cart, purchase)
+        |
+        v
+Server-side Google Tag Manager container
+        |
+        +---> Google Analytics 4
+        +---> TikTok Conversions API
+        +---> This application's /api/events endpoint
+                    |
+                    v
+              Local event database
+                    |
+                    v
+       Scheduled job checks every 15 minutes
+       for carts with no matching purchase
+                    |
+                    v
+       Recovery action triggered automatically
+
+
+Separately:
+
+HubSpot contact created (with TikTok click ID stored)
+        |
+        v
+   Deal moves through the sales pipeline
+        |
+        v
+   Deal marked Closed Won
+        |
+        v
+Scheduled job detects this, looks up the stored
+click ID, and reports the real deal value to
+TikTok's Conversions API
+```
+
+The tracking pipeline (GA4, TikTok, event storage) runs independently of and alongside a business's existing analytics setup. Nothing about how GA4 or TikTok normally works is replaced or disrupted; this is an additional destination for the same event data.
+
+## Current live setup
+
+- **Location:** `/var/www/savanna-roast-event-store` on the production server (deliberately kept out of a user's home directory, since the web server process needs to be able to read it, and home directories are not readable by other system users by default)
+- **Ownership:** shared between the deploying user and the web server's user/group, so both automated jobs and manual commands can write to logs and the database without permission conflicts
+- **Web server:** Nginx and PHP-FPM, served at `https://limbalabs.duckdns.org/events-api/`
+- **Database:** SQLite
+- **Scheduler:** a real system cron entry runs Laravel's own scheduler every minute, which in turn runs the cart detection and HubSpot sync jobs on their own 15-minute cycles
+
+### Nginx configuration reference
 
 ```nginx
 location /events-api {
@@ -75,7 +98,7 @@ location @events_api_fallback {
 }
 ```
 
-## Local setup (fresh clone / new machine)
+## Local setup
 
 ```bash
 git clone <this-repo-url> event-store
@@ -89,17 +112,17 @@ In `.env`, set:
 ```
 DB_CONNECTION=sqlite
 ```
-(remove/comment the other `DB_*` lines)
+(remove or comment out the other `DB_*` lines)
 
-Add these (see **Credentials needed** below for where each comes from):
+Add these credentials (see below for where each comes from):
 ```
 HUBSPOT_SERVICE_KEY=
 TIKTOK_PIXEL_ID=
 TIKTOK_ACCESS_TOKEN=
-RECOVERY_WEBHOOK_URL=   # optional
+RECOVERY_WEBHOOK_URL=
 ```
 
-In `config/services.php`, confirm these blocks exist (add if not):
+In `config/services.php`, confirm these blocks exist:
 ```php
 'hubspot' => [
     'service_key' => env('HUBSPOT_SERVICE_KEY'),
@@ -120,15 +143,15 @@ php artisan migrate
 php artisan serve --host=0.0.0.0 --port=8000
 ```
 
-Visit `http://localhost:8000/dashboard`.
+Visit `http://localhost:8000/dashboard` to see the live event dashboard.
 
-## Credentials needed
+## Where credentials come from
 
-| Variable | Where to get it |
+| Variable | Source |
 |---|---|
-| `HUBSPOT_SERVICE_KEY` | HubSpot → Settings → Development → Keys → Service keys. Scopes needed: `crm.objects.deals.read`, `crm.objects.contacts.read`. **Not** the legacy Private Apps path — HubSpot is deprecating that; use Service Keys. |
-| `TIKTOK_PIXEL_ID` / `TIKTOK_ACCESS_TOKEN` | TikTok Ads Manager → Events Manager → your Pixel → Settings → Conversions API. Same credentials already used in the GTM server-side TikTok tags (Phase 2). |
-| `RECOVERY_WEBHOOK_URL` | Optional. Any webhook-accepting URL (Zapier, Make, a real automation platform) if you want the cart-abandonment trigger to actually POST somewhere instead of only logging. |
+| `HUBSPOT_SERVICE_KEY` | HubSpot Settings, Development, Keys, Service keys. Required scopes: `crm.objects.deals.read`, `crm.objects.contacts.read`. This uses HubSpot's newer Service Keys system rather than the older Private Apps flow, which HubSpot is phasing out. |
+| `TIKTOK_PIXEL_ID` / `TIKTOK_ACCESS_TOKEN` | TikTok Ads Manager, Events Manager, the relevant Pixel, Settings, Conversions API. |
+| `RECOVERY_WEBHOOK_URL` | Optional. Any webhook-accepting URL (Zapier, Make, or a real automation platform) if the cart recovery trigger should actually notify somewhere, rather than only writing to the log. |
 
 ## Testing each piece
 
@@ -145,41 +168,33 @@ curl -X POST http://localhost:8000/api/events \
     "currency": "USD"
   }'
 ```
-(`event_time` is optional — defaults to server receipt time if omitted,
-since server-side GTM's variable picker has no reliable timestamp source.)
+`event_time` is optional and defaults to the server's own receipt time if omitted.
 
 **Abandoned cart detection:**
 ```bash
 php artisan carts:detect-abandoned --minutes=0
 ```
-(`--minutes=0` forces any existing `add_to_cart` to count as abandoned
-immediately, for testing without waiting.)
+`--minutes=0` treats any existing cart as immediately abandoned, useful for testing without waiting.
 
-**HubSpot → TikTok sync:**
+**HubSpot to TikTok sync:**
 ```bash
 php artisan hubspot:sync-closed-deals
 ```
-Requires a HubSpot Deal in "Closed Won" stage, associated with a Contact
-that has `tiktok_click_id` set. Check `storage/logs/laravel.log` for the
-`TikTok offline conversion sent` entry to confirm TikTok's API response
-(`"code": 0` = accepted).
+Requires a HubSpot deal in the Closed Won stage, associated with a contact that has a stored TikTok click ID. Check `storage/logs/laravel.log` for the "TikTok offline conversion sent" entry to confirm TikTok's response. A `code: 0` response means TikTok accepted the event.
 
-Confirm both are registered on schedule:
+Confirm both jobs are registered on schedule:
 ```bash
 php artisan schedule:list
 ```
 
-## Wiring into GTM (Phase 3, Session 2)
+## Connecting the tracking pipeline
 
-In `limbashop-server` (the server-side GTM container), an **HTTP Request**
-tag (built-in type) fires alongside the existing GA4/TikTok tags:
+In the server-side Google Tag Manager container, a single HTTP Request tag fires alongside the existing GA4 and TikTok tags on the same triggers:
 
 - Method: POST
 - URL: `https://limbalabs.duckdns.org/events-api/api/events`
 - Header: `Content-Type: application/json`
-- Body (**must be built via GTM's variable-picker autocomplete, not typed
-  manually** — typed `{{Variable Name}}` text does not reliably resolve in
-  this tag type's raw JSON editor):
+- Body (built using GTM's variable picker, not typed manually, since manually typed variable references do not reliably resolve in this tag type):
   ```json
   {
     "event_id": "{{Event Data - event_id}}",
@@ -190,24 +205,15 @@ tag (built-in type) fires alongside the existing GA4/TikTok tags:
     "currency": "{{Event Data - currency}}"
   }
   ```
-- Trigger: same `add_to_cart` / `purchase` triggers already firing GA4/TikTok
 
-## Wiring into HubSpot + the landing page (Phase 5)
+## Connecting the offline conversion bridge
 
-1. HubSpot custom Contact property: `TikTok Click ID`
-   (`tiktok_click_id`, single-line text)
-2. Landing page (`limbalabs.duckdns.org/agency/`) captures `?ttclid=` from
-   the URL and rewrites it into `?tiktok_click_id=` before HubSpot's
-   embedded form loads — HubSpot's iframe form reads the parent page's URL
-   query string and auto-fills any hidden field whose internal name
-   matches a query parameter name
-3. **Domain whitelisting required:** HubSpot flags form submissions from
-   unrecognized domains as spam by default. Add your domain under
-   Settings → Tracking Code → Advanced Tracking → Additional site domains
-4. `hubspot:sync-closed-deals` polls for Closed Won deals every 15 minutes
-   and completes the loop
+1. A custom Contact property in HubSpot: `TikTok Click ID` (internal name `tiktok_click_id`, single-line text).
+2. On the landing page, a small script reads the `ttclid` parameter TikTok appends to ad-click URLs and rewrites it into a `tiktok_click_id` query parameter before HubSpot's embedded form loads. HubSpot's form reads the parent page's URL and auto-fills any hidden field whose internal name matches a query parameter name.
+3. New domains sending form submissions need to be added under HubSpot Settings, Tracking Code, Advanced Tracking, Additional site domains, or submissions get silently flagged as spam.
+4. The `hubspot:sync-closed-deals` command checks for newly closed deals every 15 minutes and completes the loop back to TikTok.
 
-## Deployment (fresh EC2 / new server)
+## Deploying to a fresh server
 
 ```bash
 git clone <this-repo-url> /var/www/savanna-roast-event-store
@@ -215,17 +221,15 @@ cd /var/www/savanna-roast-event-store
 composer install --no-dev --optimize-autoloader
 cp .env.example .env
 php artisan key:generate
-# set DB_CONNECTION=sqlite and the credentials above in .env
 touch database/database.sqlite
 php artisan migrate --force
 
 sudo chown -R ubuntu:www-data /var/www/savanna-roast-event-store
 sudo chmod -R 775 storage bootstrap/cache database
-sudo usermod -a -G www-data ubuntu   # then re-login or `newgrp www-data`
+sudo usermod -a -G www-data ubuntu
 ```
 
-Add the Nginx config block from above, `sudo nginx -t && sudo systemctl
-reload nginx`.
+Add the Nginx config above, then `sudo nginx -t && sudo systemctl reload nginx`.
 
 Register the real cron entry:
 ```bash
@@ -235,14 +239,10 @@ crontab -e
 * * * * * cd /var/www/savanna-roast-event-store && php artisan schedule:run >> /dev/null 2>&1
 ```
 
-## Git push authentication note
+## A note on Git authentication
 
-GitHub no longer accepts account passwords for git operations. Use a
-Personal Access Token instead (GitHub → Settings → Developer settings →
-Personal access tokens → Tokens (classic), `repo` scope), and use it in
-place of your password when prompted. To avoid re-entering it every push:
+GitHub no longer accepts account passwords for git operations over HTTPS. Use a Personal Access Token instead (GitHub, Settings, Developer settings, Personal access tokens, Tokens classic, `repo` scope), entered in place of the password when prompted. To avoid re-entering it on every push:
 ```bash
 git config --global credential.helper store
 ```
-Also avoid `sudo` on git commands in this project — it can create
-file-ownership mismatches with the `ubuntu:www-data` setup above.
+Avoid running git commands with `sudo` in this project, since it can create file ownership mismatches with the setup described above.
